@@ -1,0 +1,52 @@
+name: Build APK from ZIP
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: # 允许在网页上手动点击运行
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    # 1. 拉取仓库代码
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    # 2. 解压你上传的 MyApp.zip 压缩包
+    - name: Unzip Source Code
+      run: |
+        unzip -o MyApp.zip -d .
+        rm MyApp.zip # 解压后删除 ZIP，保持目录干净
+
+    # 3. 配置 JDK 17 环境
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    # 4. 配置 Gradle 环境
+    - name: Setup Gradle
+      uses: gradle/gradle-build-action@v3
+      with:
+        gradle-version: 8.2.1
+
+    # 5. 下载庞大的 AI 模型（因为 ZIP 里没有模型，必须在云端下载）
+    - name: Prepare Assets & Models
+      run: |
+        mkdir -p app/src/main/assets/models
+        wget -c -q --tries=5 --timeout=30 https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx -O app/src/main/assets/models/model.int8.onnx
+        wget -c -q --tries=5 --timeout=30 https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt -O app/src/main/assets/models/tokens.txt
+
+    # 6. 执行打包（包含 R8 混淆）
+    - name: Build APK
+      run: gradle assembleDebug
+
+    # 7. 上传打好的 APK 供你下载
+    - name: Upload APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-APK
+        path: app/build/outputs/apk/debug/app-debug.apk
