@@ -1,0 +1,50 @@
+name: Build Android App
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 1. 检出源码
+      uses: actions/checkout@v4
+
+    # 配置 JDK 17 环境以满足 Gradle 8.2.2 编译要求
+    - name: 2. 设置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: 3. 授予 Gradle 执行权限
+      run: chmod +x gradlew
+
+    # 【全自动下载与准备 AI 模型脚本】
+    # 会自动在项目 assets/models 目录中下载 sherpa-onnx-sense-voice 的核心模型和字典文件
+    - name: 4. 全自动下载 AI 模型
+      run: |
+        echo "正在创建模型存放目录..."
+        mkdir -p app/src/main/assets/models
+        
+        echo "正在下载 model.int8.onnx 模型文件（较大，请耐心等待）..."
+        wget -c -q --tries=5 --timeout=120 -O app/src/main/assets/models/model.int8.onnx "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx"
+        
+        echo "正在下载 tokens.txt 字典文件..."
+        wget -c -q --tries=5 --timeout=60 -O app/src/main/assets/models/tokens.txt "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt"
+        
+        echo "模型文件下载检查："
+        ls -lh app/src/main/assets/models/
+
+    - name: 5. 使用 Gradle 编译打包 APK (Release)
+      run: ./gradlew assembleRelease
+
+    - name: 6. 上传生成的 APK 产物
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXuZhiYing-Release-APK
+        path: app/build/outputs/apk/release/app-release.unaligned.apk
