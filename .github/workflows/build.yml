@@ -1,0 +1,17 @@
+# 1. 初始化 Git
+git init
+
+# 2. 添加所有文件
+git add .
+
+# 3. 提交代码
+git commit -m "Fix: V100.5 完美回归版，修复对齐Bug"
+
+# 4. 切换到 main 分支
+git branch -M main
+
+# 5. 关联你的 GitHub 仓库（⚠️ 替换成你自己的仓库地址）
+git remote add origin https://github.com/你的用户名/你的仓库名.git
+
+# 6. 强制推送到 GitHub
+git push -u origin main --force
