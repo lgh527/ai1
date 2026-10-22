@@ -1,0 +1,79 @@
+name: 灵序织影 - 云端全自动打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 全自动智能解压
+      run: |
+        mkdir -p temp_unzip
+        unzip -o MyApp.zip -d temp_unzip
+        # 智能检测压缩包内是否有多层文件夹
+        if [ -d "temp_unzip/$(ls temp_unzip | head -n 1)/app" ]; then
+          cp -r temp_unzip/*/* .
+        else
+          cp -r temp_unzip/* .
+        fi
+        rm -rf temp_unzip MyApp.zip
+        echo "解压完成，当前目录："
+        ls -F
+
+    - name: 3. 配置 JDK 17 环境
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle 构建工具
+      uses: gradle/gradle-build-action@v3
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 全自动下载所有 AI 依赖模型 (国内镜像 + 强制校验)
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+        
+        echo "===== 开始下载 语音识别模型 ====="
+        wget -c -q --tries=3 --timeout=120 https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx -O model.int8.onnx
+        
+        echo "===== 开始下载 字典 ====="
+        wget -c -q --tries=3 --timeout=60 https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt -O tokens.txt
+        
+        echo "===== 开始下载 背景人声分离模型 (UVR) ====="
+        wget -c -q --tries=3 --timeout=120 https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx -O UVR_MDXNET_9482.onnx
+
+        echo "===== 检查全部依赖文件完整性 ====="
+        if [ ! -f model.int8.onnx ] || [ $(stat -c%s model.int8.onnx) -lt 100000000 ]; then
+          echo "❌ 错误：ONNX 主模型下载不完整或失败！"
+          exit 1
+        fi
+        if [ ! -f tokens.txt ] || [ $(stat -c%s tokens.txt) -lt 10000 ]; then
+          echo "❌ 错误：字典文件下载失败！"
+          exit 1
+        fi
+        if [ ! -f UVR_MDXNET_9482.onnx ] || [ $(stat -c%s UVR_MDXNET_9482.onnx) -lt 20000000 ]; then
+          echo "❌ 错误：UVR 分离模型下载失败！"
+          exit 1
+        fi
+        echo "✅ 全部模型与依赖字典下载完毕，大小校验通过！"
+
+    - name: 6. 执行打包命令
+      run: |
+        echo "开始执行 Gradle 打包..."
+        gradle assembleDebug
+
+    - name: 7. 上传打包好的 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-APK
+        path: app/build/outputs/apk/debug/app-debug.apk
