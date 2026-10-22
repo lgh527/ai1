@@ -1,0 +1,51 @@
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+    - name: 解压源码
+      run: |
+        mkdir -p temp
+        unzip -o MyApp.zip -d temp
+        if [ -d "temp/$(ls temp | head -n 1)/app" ]; then cp -r temp/*/* .; else cp -r temp/* .; fi
+        rm -rf temp MyApp.zip
+    - uses: actions/setup-java@v4
+      with: { java-version: '17', distribution: 'temurin' }
+    - uses: gradle/gradle-build-action@v3
+      with: { gradle-version: 8.2.1 }
+    - name: 下载模型
+      run: |
+        mkdir -p app/src/main/assets/models && cd app/src/main/assets/models
+        sudo apt-get update -qq && sudo apt-get install -y aria2
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o model.int8.onnx "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" || wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" -O model.int8.onnx
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o tokens.txt "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" || wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" -O tokens.txt
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o UVR_MDXNET_9482.onnx "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx" || wget -c -q --tries=5 --timeout=60 "https://github.com/k2-fsa/sherpa-onnx/releases/download/source-separation-models/UVR_MDXNET_9482.onnx" -O UVR_MDXNET_9482.onnx
+        [ $(stat -c%s model.int8.onnx) -gt 100000000 ] && [ $(stat -c%s tokens.txt) -gt 10000 ] && [ $(stat -c%s UVR_MDXNET_9482.onnx) -gt 20000000 ] || exit 1
+    - name: 打包
+      run: gradle assembleDebug
+    - uses: actions/upload-artifact@v4
+      with: { name: LingXu-App-APK, path: app/build/outputs/apk/debug/app-debug.apk }
+EOF
+
+git add .github/workflows/android.yml
+git commit -m "Update workflow" -q || true
+git push -q
+
+sleep 5
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+RUN_ID=$(gh run list --repo "$REPO" --workflow=android.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+
+if [ -n "$RUN_ID" ]; then
+  gh run watch "$RUN_ID" --repo "$REPO" --exit-status || exit 1
+  mkdir -p apk
+  gh run download "$RUN_ID" --repo "$REPO" -D apk
+  echo "✅ 打包完成，APK 已保存在当前目录 apk/ 中。"
+fi
+
+
