@@ -1,0 +1,99 @@
+name: 灵序织影 V111 - 全自动正式签名打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 全自动智能解压
+      run: |
+        mkdir -p temp_unzip
+        # 自动解压仓库根目录下的 V111 压缩包
+        unzip -o LingXuZhiYing_V111_Release.zip -d temp_unzip || unzip -o *.zip -d temp_unzip
+        rm -rf temp_unzip/.github
+        
+        if [ -d "temp_unzip/app" ]; then
+          cp -r temp_unzip/. .
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            cp -r temp_unzip/$FIRST_DIR/. .
+          else
+            cp -r temp_unzip/. .
+          fi
+        fi
+        
+        rm -rf temp_unzip LingXuZhiYing_V111_Release.zip
+        echo "✅ 解压完成，当前目录："
+        ls -AF
+
+    - name: 3. 配置 JDK 17 环境
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle 构建工具
+      uses: gradle/gradle-build-action@v3
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 自动生成专属签名文件 (无需配置秘钥，全自动生成)
+      run: |
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass 123456 -keypass 123456 -dname "CN=Android, OU=Android, O=Android, L=Android, ST=Android, C=US"
+        echo "✅ 签名文件自动生成完毕"
+
+    - name: 6. 全自动下载所有 V111 AI 依赖模型
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+
+        echo "===== 安装 aria2 多线程下载工具 ====="
+        sudo apt-get update -qq && sudo apt-get install -y aria2
+
+        echo "===== 下载 Paraformer 中文 ASR 模型 ====="
+        mkdir -p sherpa-onnx-paraformer-zh-small
+        cd sherpa-onnx-paraformer-zh-small
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o model.int8.onnx "https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-int8-2025-10-07/resolve/main/model.int8.onnx" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-int8-2025-10-07/resolve/main/model.int8.onnx" -O model.int8.onnx
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o tokens.txt "https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-int8-2025-10-07/resolve/main/tokens.txt" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/csukuangfj/sherpa-onnx-paraformer-zh-int8-2025-10-07/resolve/main/tokens.txt" -O tokens.txt
+        cd ..
+
+        echo "===== 下载 Omnilingual CTC-300M + SentencePiece 强对齐模型 ====="
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o omnilingual-ctc-300m.tflite "https://hf-mirror.com/soniqo/Omnilingual-ASR-CTC-300M-LiteRT/resolve/main/omnilingual-ctc-300m.tflite" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/soniqo/Omnilingual-ASR-CTC-300M-LiteRT/resolve/main/omnilingual-ctc-300m.tflite" -O omnilingual-ctc-300m.tflite
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o tokenizer.model "https://hf-mirror.com/soniqo/Omnilingual-ASR-CTC-300M-LiteRT/resolve/main/tokenizer.model" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/soniqo/Omnilingual-ASR-CTC-300M-LiteRT/resolve/main/tokenizer.model" -O tokenizer.model
+
+        echo "===== 下载 bge-small-zh-v1.5 语义对齐模型 + 字典 ====="
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o bge-small-zh-v1.5.onnx "https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/onnx/model_quantized.onnx" -O bge-small-zh-v1.5.onnx
+        aria2c -x 4 -s 4 --max-tries=5 --retry-wait=3 --timeout=30 --allow-overwrite=true -o tokenizer.json "https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/tokenizer.json" || \
+        wget -c -q --tries=5 --timeout=60 "https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main/tokenizer.json" -O tokenizer.json
+
+        echo "===== 校验所有模型文件完整性 ====="
+        test -s sherpa-onnx-paraformer-zh-small/model.int8.onnx && test -s sherpa-onnx-paraformer-zh-small/tokens.txt || { echo "❌ Paraformer 模型下载失败"; exit 1; }
+        test -s omnilingual-ctc-300m.tflite && test -s tokenizer.model || { echo "❌ Omnilingual 模型下载失败"; exit 1; }
+        test -s bge-small-zh-v1.5.onnx && test -s tokenizer.json || { echo "❌ bge 语义模型下载失败"; exit 1; }
+        echo "✅ 全部 V111 AI 依赖模型准备完整"
+
+    - name: 7. 执行正式版打包命令
+      run: |
+        echo "开始执行 Release 正式版打包..."
+        gradle assembleRelease
+
+    - name: 8. 上传打包好的正式版 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-Release-Signed-V111
+        path: app/build/outputs/apk/release/app-release.apk
+        if-no-files-found: error
