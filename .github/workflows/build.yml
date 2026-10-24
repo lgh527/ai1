@@ -1,0 +1,78 @@
+name: 灵序织影 V118 - 全自动正式签名打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 全自动智能解压
+      run: |
+        mkdir -p temp_unzip
+        unzip -o LingXuZhiYing_V118_Release.zip -d temp_unzip || unzip -o *.zip -d temp_unzip
+        rm -rf temp_unzip/.github
+        
+        if [ -d "temp_unzip/app" ]; then
+          cp -r temp_unzip/. .
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            cp -r temp_unzip/$FIRST_DIR/. .
+          else
+            cp -r temp_unzip/. .
+          fi
+        fi
+        
+        rm -rf temp_unzip LingXuZhiYing_V118_Release.zip
+        echo "✅ 解压完成，当前目录："
+        ls -AF
+
+    - name: 3. 配置 JDK 17 环境
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle 构建工具
+      uses: gradle/gradle-build-action@v3
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 自动生成专属签名文件
+      run: |
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass 123456 -keypass 123456 -dname "CN=Android, OU=Android, O=Android, L=Android, ST=Android, C=US"
+
+    - name: 6. 全自动下载所有 AI 依赖模型
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+
+        echo "===== 下载 语音识别模型 ====="
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" -O model.int8.onnx
+
+        echo "===== 下载 字典 ====="
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" -O tokens.txt
+
+        echo "===== 下载 语义对齐模型 ====="
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/Arm/minilm-l6-v2-int8-litert/resolve/main/minilm-l6-v2_litert_optimized.tflite" -O minilm.tflite
+
+        if [ ! -f model.int8.onnx ] || [ ! -f tokens.txt ] || [ ! -f minilm.tflite ]; then exit 1; fi
+        echo "✅ 依赖完整"
+
+    - name: 7. 执行正式版打包命令
+      run: |
+        echo "开始执行 Release 正式版打包..."
+        gradle assembleRelease
+
+    - name: 8. 上传打包好的正式版 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-Release-Signed-V118
+        path: app/build/outputs/apk/release/app-release.apk
