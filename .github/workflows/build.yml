@@ -1,0 +1,95 @@
+name: 灵序织影 V187 - 初版缝合版打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取仓库代码
+      uses: actions/checkout@v4
+
+    - name: 2. 全自动智能解压源码
+      run: |
+        mkdir -p temp_unzip
+        unzip -o *.zip -d temp_unzip
+        rm -rf temp_unzip/.github
+        if [ -d "temp_unzip/app" ]; then
+          cp -r temp_unzip/. .
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            cp -r temp_unzip/$FIRST_DIR/. .
+          else
+            cp -r temp_unzip/. .
+          fi
+        fi
+        rm -rf temp_unzip *.zip
+        echo "✅ 源码解压完成"
+
+    - name: 3. 配置 JDK 17 环境
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle 构建工具
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 自动生成专属签名并注入源码（防破解封印）
+      run: |
+        rm -f release.jks
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass 123456 -keypass 123456 -dname "CN=Android, OU=Android, O=Android, L=Android, ST=Android, C=US" -noprompt
+        SIGNATURE_HEX=$(keytool -list -v -keystore release.jks -alias release -storepass 123456 | grep "SHA256:" | sed 's/.*SHA256: //' | sed 's/://g' | tr '[:lower:]' '[:upper:]')
+        find app/src/main/java -name "MainActivity.kt" -exec sed -i "s/YOUR_APP_SIGNATURE_PLACEHOLDER/$SIGNATURE_HEX/g" {} +
+        echo "✅ 签名注入完成!"
+
+    - name: 6. 全自动处理 AI 依赖模型
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+
+        echo "===== 下载 语音识别模型 (SenseVoice) ====="
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" -O model.int8.onnx
+
+        echo "===== 下载 字典文件 ====="
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" -O tokens.txt
+
+        cd ../../../../..
+
+        echo "===== 从 Release 下载 大模型 (Gemma 2B) 并解压 ====="
+        wget -c --tries=5 --timeout=300 "https://github.com/lgh527/ai1/releases/download/v1.0/gemma-tflite-gemma-2b-it-gpu-int4-v1.tar.gz" -O gemma_model.tar.gz
+        tar -xzvf gemma_model.tar.gz
+        find . -name "*.bin" -exec mv {} app/src/main/assets/models/ \;
+        rm -rf gemma_model.tar.gz
+        echo "✅ 大模型解压并安置完毕"
+
+    - name: 7. 检查模型文件是否完整
+      run: |
+        ls -lh app/src/main/assets/models/
+        if [ ! -f "app/src/main/assets/models/gemma-2b-it-gpu-int4.bin" ]; then
+          echo "❌ 错误: 未在 assets/models 下找到 gemma-2b-it-gpu-int4.bin 模型文件。"
+          exit 1
+        fi
+        if [ ! -f "app/src/main/assets/models/model.int8.onnx" ]; then
+          echo "❌ 错误: 未找到语音识别模型 model.int8.onnx。"
+          exit 1
+        fi
+        echo "✅ 所有 AI 大脑组件准备就绪,开始打包"
+
+    - name: 8. 执行正式版打包并捕获详细日志
+      run: |
+        gradle clean
+        gradle assembleRelease --stacktrace
+
+    - name: 9. 上传打包好的正式版 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-Release-V187-Sewed
+        path: app/build/outputs/apk/release/app-release.apk
