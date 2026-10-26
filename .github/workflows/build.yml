@@ -1,0 +1,79 @@
+name: 灵序织影 - 最终打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取代码
+      uses: actions/checkout@v4
+
+    - name: 2. 解压并智能修复架构冲突
+      run: |
+        mkdir -p temp_unzip
+        unzip -o *.zip -d temp_unzip
+        rm -rf temp_unzip/.github
+        if [ -d "temp_unzip/app" ]; then
+          cp -r temp_unzip/. .
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            cp -r temp_unzip/$FIRST_DIR/. .
+          else
+            cp -r temp_unzip/. .
+          fi
+        fi
+        rm -rf temp_unzip *.zip
+        
+        # 【修复】剔除 32 位，防止大模型打包崩溃
+        sed -i "s/'armeabi-v7a', //g" app/build.gradle
+        sed -i "s/, 'armeabi-v7a'//g" app/build.gradle
+        echo "✅ 架构修复完成"
+
+    - name: 3. 配置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 自动注入签名
+      run: |
+        rm -f release.jks
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass 123456 -keypass 123456 -dname "CN=Android, OU=Android, O=Android, L=Android, ST=Android, C=US" -noprompt
+        SIGNATURE_HEX=$(keytool -list -v -keystore release.jks -alias release -storepass 123456 | grep "SHA256:" | sed 's/.*SHA256: //' | sed 's/://g' | tr '[:lower:]' '[:upper:]')
+        find app/src/main/java -name "MainActivity.kt" -exec sed -i "s/YOUR_APP_SIGNATURE_PLACEHOLDER/$SIGNATURE_HEX/g" {} +
+        echo "✅ 签名注入完成"
+
+    - name: 6. 下载模型
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" -O model.int8.onnx
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" -O tokens.txt
+        cd ../../../../..
+        wget -c --tries=5 --timeout=300 "https://github.com/lgh527/ai1/releases/download/v1.0/gemma-tflite-gemma-2b-it-gpu-int4-v1.tar.gz" -O gemma_model.tar.gz
+        tar -xzvf gemma_model.tar.gz
+        find . -name "*.bin" -exec mv {} app/src/main/assets/models/ \;
+        rm -rf gemma_model.tar.gz
+
+    - name: 7. 执行打包
+      run: |
+        gradle clean
+        # 分配 8G 内存防 OOM
+        gradle assembleRelease -Dorg.gradle.jvmargs="-Xmx8192m -Dfile.encoding=UTF-8" --stacktrace
+
+    - name: 8. 上传 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-Release
+        path: app/build/outputs/apk/release/app-release.apk
