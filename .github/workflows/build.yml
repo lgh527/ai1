@@ -1,0 +1,158 @@
+name: 灵序织影 - 终极防破解打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx3g -Dorg.gradle.workers.max=1"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取代码
+      uses: actions/checkout@v4
+
+    - name: 2. 解压源码
+      run: |
+        mkdir -p temp_unzip
+        ZIP_FILE=$(ls *.zip 2>/dev/null | head -n 1)
+        if [ -z "$ZIP_FILE" ]; then
+          echo "::error::未找到 ZIP 文件"
+          exit 1
+        fi
+        unzip -o "$ZIP_FILE" -d temp_unzip
+        rm -rf temp_unzip/.github
+
+        if [ -d "temp_unzip/app" ]; then
+          PROJECT_ROOT="temp_unzip"
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            PROJECT_ROOT="temp_unzip/$FIRST_DIR"
+          else
+            PROJECT_ROOT="temp_unzip"
+          fi
+        fi
+
+        cp -r "$PROJECT_ROOT"/. .
+        rm -rf temp_unzip *.zip
+
+        if [ ! -f "settings.gradle" ] || [ ! -d "app" ]; then
+          echo "::error::源码结构异常：缺少 settings.gradle 或 app/ 目录"
+          exit 1
+        fi
+
+    - name: 3. 配置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle（版本与项目 Wrapper 对齐）
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.2
+        cache-provider: basic
+
+    - name: 5. 下载并补全 gradle-wrapper.jar（关键修复）
+      run: |
+        mkdir -p gradle/wrapper
+        echo "正在下载 gradle-wrapper.jar (v8.2)..."
+        curl -L -o gradle/wrapper/gradle-wrapper.jar \
+          https://github.com/gradle/gradle/raw/v8.2.0/gradle/wrapper/gradle-wrapper.jar
+        
+        if [ ! -f "gradle/wrapper/gradle-wrapper.jar" ]; then
+          echo "::error::gradle-wrapper.jar 下载失败"
+          exit 1
+        fi
+        ls -lh gradle/wrapper/gradle-wrapper.jar
+
+    - name: 6. 生成专属签名并注入签名指纹（防破解）
+      run: |
+        rm -f release.jks
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 \
+          -validity 10000 -alias release -storepass 123456 -keypass 123456 \
+          -dname "CN=Android" -noprompt
+
+        SIGNATURE_HEX=$(keytool -list -v -keystore release.jks -alias release -storepass 123456 \
+          | grep -iE "SHA-?256:" \
+          | head -n 1 \
+          | sed -E 's/.*SHA-?256:[[:space:]]*//' \
+          | tr -d ':' \
+          | tr '[:lower:]' '[:upper:]' \
+          | tr -d '[:space:]')
+
+        if [ -z "$SIGNATURE_HEX" ] || [ ${#SIGNATURE_HEX} -ne 64 ]; then
+          echo "::error::签名指纹提取失败或长度异常（期望 64 位，实际 ${#SIGNATURE_HEX} 位）"
+          exit 1
+        fi
+        echo "签名指纹: $SIGNATURE_HEX"
+
+        TARGET_FILE="app/src/main/java/com/lingxu/zhiying/MainActivity.kt"
+        if [ ! -f "$TARGET_FILE" ]; then
+          echo "::error::未找到 MainActivity.kt：$TARGET_FILE"
+          exit 1
+        fi
+
+        if ! grep -q "YOUR_APP_SIGNATURE_PLACEHOLDER" "$TARGET_FILE"; then
+          echo "::warning::MainActivity.kt 中未找到占位符 YOUR_APP_SIGNATURE_PLACEHOLDER，跳过注入"
+        else
+          sed -i "s/YOUR_APP_SIGNATURE_PLACEHOLDER/$SIGNATURE_HEX/g" "$TARGET_FILE"
+          echo "已注入签名指纹"
+        fi
+
+    - name: 7. 下载 AI 模型
+      run: |
+        mkdir -p app/src/main/assets/models
+        cd app/src/main/assets/models
+
+        ASR_BASE="https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main"
+
+        echo "下载 SenseVoice 模型..."
+        if ! wget -q --tries=5 --timeout=180 "$ASR_BASE/model.int8.onnx" -O model.int8.onnx; then
+          echo "::error::SenseVoice model.int8.onnx 下载失败"
+          exit 1
+        fi
+        if ! wget -q --tries=5 --timeout=180 "$ASR_BASE/tokens.txt" -O tokens.txt; then
+          echo "::error::SenseVoice tokens.txt 下载失败"
+          exit 1
+        fi
+
+        ASR_SIZE=$(stat -c%s model.int8.onnx)
+        if [ "$ASR_SIZE" -lt 104857600 ]; then
+          echo "::error::model.int8.onnx 文件过小（${ASR_SIZE} 字节），可能下载不完整"
+          exit 1
+        fi
+
+        echo "下载 Gemma 模型（可选）..."
+        cd "$GITHUB_WORKSPACE"
+        GEMMA_URL="https://github.com/lgh527/ai1/releases/download/v1.0/gemma-tflite-gemma-2b-it-gpu-int4-v1.tar.gz"
+        if wget -q --tries=3 --timeout=300 "$GEMMA_URL" -O gemma_model.tar.gz; then
+          tar -xzf gemma_model.tar.gz
+          find . -name "*.bin" -exec mv {} app/src/main/assets/models/ \; 2>/dev/null || true
+          rm -f gemma_model.tar.gz
+          if [ -f "app/src/main/assets/models/gemma-2b-it-gpu-int4.bin" ]; then
+            GEMMA_SIZE=$(stat -c%s app/src/main/assets/models/gemma-2b-it-gpu-int4.bin)
+            echo "Gemma 模型已就绪（${GEMMA_SIZE} 字节）"
+          else
+            echo "::warning::Gemma 模型解压后未找到 .bin 文件，LLM 功能将降级"
+          fi
+        else
+          echo "::warning::Gemma 模型下载失败，LLM 功能将降级，但不影响 APK 构建"
+        fi
+
+    - name: 8. 执行打包
+      run: |
+        chmod +x gradlew
+        ./gradlew clean assembleRelease --no-daemon --no-parallel --max-workers=1 --stacktrace
+
+    - name: 9. 上传 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-App-AntiCrack
+        path: app/build/outputs/apk/release/app-release.apk
+        if-no-files-found: error
