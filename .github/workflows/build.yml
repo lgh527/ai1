@@ -1,0 +1,110 @@
+name: 灵序织影 - 终极防爆打包
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.workers.max=1"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: 1. 拉取代码
+      uses: actions/checkout@v4
+
+    - name: 2. 清理并解压源码
+      run: |
+        mkdir -p temp_unzip
+        unzip -o *.zip -d temp_unzip
+        rm -rf temp_unzip/.github
+        if [ -d "temp_unzip/app" ]; then
+          cp -r temp_unzip/. .
+        else
+          FIRST_DIR=$(ls -A temp_unzip | head -n 1)
+          if [ -d "temp_unzip/$FIRST_DIR/app" ]; then
+            cp -r temp_unzip/$FIRST_DIR/. .
+          else
+            cp -r temp_unzip/. .
+          fi
+        fi
+        rm -rf temp_unzip *.zip
+        echo "✅ 源码解压完成"
+
+    - name: 3. 配置 JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: 4. 配置 Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: 8.2.1
+
+    - name: 5. 自动生成签名
+      run: |
+        rm -f release.jks
+        keytool -genkey -v -keystore release.jks -keyalg RSA -keysize 2048 -validity 10000 -alias release -storepass 123456 -keypass 123456 -dname "CN=Android, OU=Android, O=Android, L=Android, ST=Android, C=US" -noprompt
+        SIGNATURE_HEX=$(keytool -list -v -keystore release.jks -alias release -storepass 123456 | grep "SHA256:" | sed 's/.*SHA256: //' | sed 's/://g' | tr '[:lower:]' '[:upper:]')
+        find app/src/main/java -name "MainActivity.kt" -exec sed -i "s/YOUR_APP_SIGNATURE_PLACEHOLDER/$SIGNATURE_HEX/g" {} +
+        find app/src/main/java -name "*.kt" -exec sed -i "s/YOUR_APP_SIGNATURE_PLACEHOLDER/$SIGNATURE_HEX/g" {} +
+        grep -rn "$SIGNATURE_HEX" app/src/main/java && echo "✅ 签名注入完成"
+
+    - name: 6. 下载模型
+      run: |
+        mkdir -p app/src/main/assets/models app/libs
+
+        # 6.1 Sherpa-ONNX 官方预编译 AAR（含 Kotlin API + 各 ABI 的 .so）
+        wget -c -q --tries=6 --timeout=300 "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-1.13.5.aar" -O app/libs/sherpa-onnx-1.13.5.aar
+        ls -lh app/libs/
+
+        # 6.2 SenseVoice 中英日韩粤 int8 + tokens
+        cd app/src/main/assets/models
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/model.int8.onnx" -O model.int8.onnx
+        wget -c -q --tries=10 --timeout=120 "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main/tokens.txt" -O tokens.txt
+        cd ../../../../..
+
+        # 6.3 Gemma-2B-IT int4
+        wget -c --tries=5 --timeout=300 "https://github.com/lgh527/ai1/releases/download/v1.0/gemma-tflite-gemma-2b-it-gpu-int4-v1.tar.gz" -O gemma_model.tar.gz
+        tar -xzvf gemma_model.tar.gz
+        find . -name "*.bin" -exec mv {} app/src/main/assets/models/ \;
+        rm -rf gemma_model.tar.gz
+
+        ls -lh app/src/main/assets/models/
+
+        # 6.4 完整性校验：wget -q -O 失败会留下 0 字节同名文件，必须卡体积
+        ONNX_SIZE=$(stat -c%s app/src/main/assets/models/model.int8.onnx 2>/dev/null || echo 0)
+        TOKEN_SIZE=$(stat -c%s app/src/main/assets/models/tokens.txt 2>/dev/null || echo 0)
+        AAR_SIZE=$(stat -c%s app/libs/sherpa-onnx-1.13.5.aar 2>/dev/null || echo 0)
+        BIN_SIZE=$(find app/src/main/assets/models -name "*.bin" -printf "%s\n" 2>/dev/null | head -n 1)
+        BIN_SIZE=${BIN_SIZE:-0}
+        echo "model.int8.onnx = $ONNX_SIZE bytes"
+        echo "tokens.txt      = $TOKEN_SIZE bytes"
+        echo "sherpa AAR      = $AAR_SIZE bytes"
+        echo "gemma *.bin     = $BIN_SIZE bytes"
+        FAIL=0
+        [ "$ONNX_SIZE" -lt 10000000 ] && { echo "❌ SenseVoice 模型残缺（应约 200MB+）"; FAIL=1; }
+        [ "$TOKEN_SIZE" -lt 1000 ] && { echo "❌ tokens.txt 残缺"; FAIL=1; }
+        [ "$AAR_SIZE" -lt 1000000 ] && { echo "❌ sherpa-onnx AAR 残缺，ASR 必然 UnsatisfiedLinkError"; FAIL=1; }
+        [ "$BIN_SIZE" -lt 100000000 ] && { echo "⚠️ Gemma 模型偏小或不存在，大模型仲裁将不可用（不阻断打包）"; }
+        if [ "$FAIL" = "1" ]; then
+          echo "模型下载不完整，终止打包，避免产出装上却什么都识别不出来的坏 APK"
+          exit 1
+        fi
+        echo "✅ 模型下载完毕且完整性校验通过"
+
+    - name: 7. 执行打包 (强制单线程低内存)
+      run: |
+        gradle --stop
+        gradle clean
+        gradle assembleRelease -Dorg.gradle.jvmargs="-Xmx4g" --no-daemon --no-parallel --max-workers=1 --stacktrace
+
+    - name: 8. 上传 APK
+      uses: actions/upload-artifact@v4
+      with:
+        name: LingXu-V211-AntiOOM
+        path: app/build/outputs/apk/release/app-release.apk
